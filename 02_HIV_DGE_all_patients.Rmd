@@ -1,0 +1,522 @@
+
+
+```{r}
+library(remotes)
+library(readxl)
+library(xlsx)
+remotes::install_github('czarnewski/niceRplots')
+
+library(niceRplots)
+library(edgeR)
+# BiocManager::install("EDASeq")
+library(EDASeq)
+library(fgsea)
+library(rafalib)
+library(enrichR)
+
+pvt <- 0.01
+lft <- log2(1.5)
+out <- "~/Desktop/NBIS/SMS_Projects/broliden_5325_sub/results/"
+```
+
+
+
+```{r}
+counts_all <- read.csv(
+  file = "../data/TRX_rawcounts.csv",
+  row.names = 1)
+
+meta <- read.csv2(
+  file = "../data/Clinical_visit_2_3_updateJuly2022_wSampleInfo.csv"  ,
+  row.names = 1)
+counts_all <- rowsum( counts_all[,-c(1:2) ] , counts_all$symbol )
+colnames(counts_all) <- rownames(meta)[ match(colnames(counts_all),paste0("ML",meta$PatID)) ]
+counts_all <- counts_all[,order(colnames(counts_all))]
+write.csv(counts_all,"../data/TRX_counts_anonimysed.csv",row.names = T)
+dim(counts_all)
+
+metadata_all <- read.csv(
+  file = "../results/metadata.csv"  ,
+  row.names = 1)
+metadata_all <- metadata_all[colnames(counts_all),]
+dim(metadata_all)
+```
+
+
+
+```{r}
+samples_use <- !( is.na(metadata_all$HIVstatus) | is.na(metadata_all$douche_vagina_3days_v3) )
+samples_use <- rownames(metadata_all)[samples_use]
+
+counts <- as.matrix(counts_all[,samples_use])
+meta   <- as.data.frame(metadata_all[ samples_use ,])
+dim(counts)
+dim(meta)
+
+if(!dir.exists("../results/HIVstatus_all")){dir.create("../results/HIVstatus_all")}
+```
+
+
+
+```{r}
+Group <- factor(meta$HIVstatus)
+meta$douche_vagina_3days_v3 <- factor((meta$douche_vagina_3days_v3 > 0)*1 )
+design <- model.matrix( ~ HIVstatus + douche_vagina_3days_v3, data=meta )
+dim(design)
+
+y <- DGEList( counts=counts , group = Group, remove.zeros=T)
+y <- calcNormFactors(object = y, method = "TMM")
+y <- estimateGLMCommonDisp(y,design)
+y <- estimateGLMTrendedDisp(y,design)
+y <- estimateGLMTagwiseDisp(y,design)
+fit <- glmFit(y, design)
+normcounts <- cpm(y, log = T, prior.count = 1, normalized.lib.sizes = T)
+
+
+# Differential expression for HIV
+lrt <- glmLRT(fit, coef = 2)
+top <- topTags(lrt, adjust.method = "fdr", n = "all", sort.by = "p.value")[[1]]
+pv <- top$PValue
+top$is_de <- (abs(top$logFC) > lft) & (pv < pvt)
+top$almost_de <- (abs(top$logFC) > lft) & (pv < pvt*3)
+
+
+# Differential expression for vaginal douching
+lrt2 <- glmLRT(fit, coef = 3)
+top2 <- topTags(lrt2, adjust.method = "fdr", n = "all", sort.by = "p.value")[[1]]
+pv <- top2$PValue
+top2$is_de <- (abs(top2$logFC) > lft) & (pv < pvt)
+top2$almost_de <- (abs(top2$logFC) > lft) & (pv < pvt*3)
+
+
+pdf("../results/HIVstatus_all/DGE_QC_plots.pdf",width = 8*2,height = 5,useDingbats = F)
+mypar(1,2)
+plotBCV(y,las=1)
+plotRLE(normcounts,ylim=c(-1,1)*0.4,outline=F,las=2)
+dev.off()
+
+
+write.csv( top , file = "../results/HIVstatus_all/DGE_HIV.csv", row.names = T)
+write.csv( top2 , file = "../results/HIVstatus_all/DGE_VDv3.csv", row.names = T)
+write.csv( normcounts , file = "../results/HIVstatus_all/normcounts.csv", row.names = T)
+write.csv( counts , file = "../results/HIVstatus_all/raw_counts.csv", row.names = T)
+```
+
+## Volcano plot
+
+
+```{r}
+pdf("../results/HIVstatus_all/DGE_volcano_plot_HIV.pdf",width = 5,height = 5,useDingbats = F)
+mypar()
+plot(top$logFC,-log10(pv),xlim=c(-1,1)*max(abs(range(top$logFC)))*1.2,
+     col=ifelse(top$is_de,"firebrick","grey70"), pch=16,
+     cex= 0.3 -log10(pv) / max(-log10(pv)) * abs(top$logFC) / max(abs(range(top$logFC)))*2 )
+text(top$logFC[top$is_de],-log10(pv)[top$is_de],
+     labels = rownames(top)[top$is_de], cex=0.2,
+     pos = ifelse(top$logFC[top$is_de] > 0 , 2, 4),offset = 0.3 )
+dev.off()
+
+
+pdf("../results/HIVstatus_all/DGE_volcano_plot_VDv3.pdf",width = 5,height = 5,useDingbats = F)
+mypar()
+plot(top2$logFC,-log10(pv),xlim=c(-1,1)*max(abs(range(top2$logFC)))*1.2,
+     col=ifelse(top2$is_de,"firebrick","grey70"), pch=16,
+     cex= 0.3 -log10(pv) / max(-log10(pv)) * abs(top2$logFC) / max(abs(range(top2$logFC)))*2 )
+text(top2$logFC[top2$is_de],-log10(pv)[top2$is_de],
+     labels = rownames(top2)[top2$is_de], cex=0.2,
+     pos = ifelse(top2$logFC[top2$is_de] > 0 , 2, 4),offset = 0.3 )
+dev.off()
+```
+
+## PCA
+
+```{r}
+PC <- prcomp( t(normcounts[rownames(top)[top$is_de],]) ,center = T,scale. = T)
+pdf("../results/HIVstatus_all/DGE_PCA_HIV.pdf",width = 5,height = 4.2,useDingbats = F)
+mypar(mar=c(3,3,2,6))
+plot(PC$x[,c(1,2)], pch=16, las=1,
+     col = c("green4","purple1")[as.numeric(as.factor(meta$HIVstatus))] )
+legend( x = par('usr')[2], y = par('usr')[4],
+        legend = levels(as.factor(meta$HIVstatus)),
+        col = c("green4","purple1"),xpd=T,pch = 16,box.lwd = 0 )
+dev.off()
+
+PC <- prcomp( t(normcounts[rownames(top2)[top2$is_de],]) ,center = T,scale. = T)
+pdf("../results/HIVstatus_all/DGE_PCA_VDv3.pdf",width = 5,height = 4.2,useDingbats = F)
+mypar(mar=c(3,3,2,6))
+plot(PC$x[,c(1,2)], pch=16, las=1,
+     col = c("cyan4","pink4")[as.numeric(as.factor(meta$douche_vagina_3days_v3))] )
+legend( x = par('usr')[2], y = par('usr')[4],
+        legend = levels(as.factor(meta$douche_vagina_3days_v3)),
+        col = c("cyan4","pink4"),xpd=T,pch = 16,box.lwd = 0 )
+dev.off()
+```
+
+
+## Heatmap
+
+```{r}
+o <- order(meta$HIVstatus)
+
+temp <- top[ top$is_de, ]
+temp <- temp[order(temp$logFC),]
+h_HIV <- setNames( c("DOWN","UP")[ (temp$logFC > 0) +1] , rownames(temp) )
+
+pheatmap::pheatmap(
+  mat = normcounts[rownames(temp),o],
+  scale = "row",
+  cluster_cols = F,
+  cluster_rows = F,
+  col = colorRampPalette(c("navy","grey95","firebrick"))(99) ,
+  border=F,
+  clustering_method = "ward.D2",
+  annotation_col = data.frame(
+    Antibiotics_v3 = factor(meta$Antibiotics_v3),
+    age = as.numeric(meta$age),
+    blood_cervix_v3 = as.numeric(meta$blood_cervix_v3),
+    BV_Diagnosis_v3 = as.numeric(meta$BV_Diagnosis_v3),
+    douche_vagina_3days_v3 = as.numeric(meta$douche_vagina_3days_v3),
+    HIVstatus = factor(meta$HIVstatus),
+    row.names = rownames(meta)) ,
+  annotation_row = data.frame(
+    is_top_DE = factor(top$is_de[top$is_de]*1),
+    abs_log2FC = abs(top$logFC)[top$is_de],
+    log10PV = -log10(top$PValue)[top$is_de],
+    row.names = rownames(top)[top$is_de]) ,
+  filename = "../results/HIVstatus_all/DGE_heatmap_HIV.pdf",cellwidth = 8,cellheight = 8 )
+
+
+o <- order(meta$douche_vagina_3days_v3)
+temp <- top2[ top2$is_de, ]
+temp <- temp[order(temp$logFC),]
+h_VDv3 <- setNames( c("DOWN","UP")[ (temp$logFC > 0) +1] , rownames(temp) )
+
+pheatmap::pheatmap(
+  mat = normcounts[rownames(temp),o],
+  scale = "row",
+  cluster_cols = F,
+  cluster_rows = F,
+  col = colorRampPalette(c("navy","grey95","firebrick"))(99) ,
+  border=F,
+  clustering_method = "ward.D2",
+  annotation_col = data.frame(
+    Antibiotics_v3 = factor(meta$Antibiotics_v3),
+    age = as.numeric(meta$age),
+    blood_cervix_v3 = as.numeric(meta$blood_cervix_v3),
+    BV_Diagnosis_v3 = as.numeric(meta$BV_Diagnosis_v3),
+    douche_vagina_3days_v3 = as.numeric(meta$douche_vagina_3days_v3),
+    HIVstatus = factor(meta$HIVstatus),
+    row.names = rownames(meta)) ,
+  annotation_row = data.frame(
+    is_top_DE = factor(top2$is_de[top2$is_de]*1),
+    abs_log2FC = abs(top2$logFC)[top2$is_de],
+    log10PV = -log10(top2$PValue)[top2$is_de],
+    row.names = rownames(top2)[top2$is_de]) ,
+  filename = "../results/HIVstatus_all/DGE_heatmap_VDv3.pdf",cellwidth = 8,cellheight = 8 )
+```
+
+
+
+
+## Gene Set Analysis (EnrichR)
+================================================================================
+
+Run Gene Analysis (Fischer exact test) for each of the desired comparissons.
+
+```{r}
+# Set cutoffs
+pvalue_cutoff <- 0.1
+no_genes_cutoff <- 3
+
+# Running enrichments for up or downregulated genes
+for(i in c("HIV","VDv3") ){
+  message(paste0("Processing comparisson   ", i))
+  cl <- get(paste0("h_",i))
+  # cl <- cutree(tree = get(paste0("h_",i))$tree_row, k=2)
+
+  for(j in unique(cl)){
+    message(paste0("Processing cluster   ", j))
+    gene_list <- names(cl)[cl == j]
+
+    # Gene Onthology
+    a <- enrichr(genes = gene_list,
+                 databases = "GO_Biological_Process_2021")[[1]]
+    a <- a[order(a$P.value,decreasing = F),]
+    a <- a[a$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(a[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    a <- a[grep("regulation",a$Term,invert = T),]
+    a <- data.frame(Term = sub("\ [(].*","",a$Term), GOID= sub(".*\ [(]","",sub("[)]","",a$Term)), P.value = a$P.value, Genes=a$Genes)
+    write.csv2(a, file=paste0("../results/HIVstatus_all/GSA_GO_",i,"_",j,".csv"))
+
+
+    # KEGG pathways
+    b <- enrichr(genes=gene_list, databases = "KEGG_2021_Human")[[1]]
+    b <- b[order(b$P.value,decreasing = F),]
+    b <- b[grep("hsa05",b$Term,invert = T),]   #Remove disease-related KEGG pathways ("hsa05"")
+    b <- b[b$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(b[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    b$KEGGID <- sub(".*sapiens ","",b$Term); b$Term <- sub(" Homo.*","",b$Term)
+    b <- data.frame(b)
+    write.csv2(b,file=paste0("../results/HIVstatus_all/GSA_KEGG_",i,"_",j,".csv"))
+
+
+    # MSigDB pathways
+    c <- enrichr(genes=gene_list, databases = "MSigDB_Hallmark_2020")[[1]]
+    c <- c[order(c$P.value,decreasing = F),]
+    c <- c[c$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(c[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    write.csv2(c,file=paste0("../results/HIVstatus_all/GSA_MSigDB_",i,"_",j,".csv"))
+
+
+    # Wiki pathways
+    c <- enrichr(genes=gene_list, databases = "WikiPathway_2021_Human")[[1]]
+    c <- c[order(c$P.value,decreasing = F),]
+    c <- c[c$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(c[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    c$wikiID <- sub(".* WP[0123456789]","WP",c$Term) ; c$Term <- sub(" WP[0123456789].*","",c$Term)
+    write.csv2(c,file=paste0("../results/HIVstatus_all/GSA_WikiPath_",i,"_",j,".csv"))
+
+
+    # TRRUST_Transcription_Factors_2019
+    d <- enrichr(genes = gene_list,
+                 databases = "TRRUST_Transcription_Factors_2019")[[1]]
+    d <- d[order(d$P.value,decreasing = F),]
+    d <- d[grepl("human",d$Term),]
+    d$Term <- sub("\ human","",d$Term)
+    d <- d[d$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(d[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    write.csv2(d,file=paste0("../results/HIVstatus_all/GSA_TF_TRRUST_",i,"_",j,".csv"))
+
+
+    # TRANSFAC_and_JASPAR_PWMs
+    f <- enrichr(genes = gene_list,
+                 databases = "TRANSFAC_and_JASPAR_PWMs")[[1]]
+    f <- f[order(f$P.value,decreasing = F),]
+    f <- f[f$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(f[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    write.csv2(f,file=paste0("../results/HIVstatus_all/GSA_TF_TRANSFAC_",i,"_",j,".csv"))
+
+
+    # ARCHS4
+    f <- enrichr(genes = gene_list,
+                 databases = "ARCHS4_TFs_Coexp")[[1]]
+    f <- f[order(f$P.value,decreasing = F),]
+    f <- f[f$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(f[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    write.csv2(f,file=paste0("../results/HIVstatus_all/GSA_TF_ARCHS4_",i,"_",j,".csv"))
+
+  }
+}
+```
+
+
+
+## Plot the GSA results.
+
+```{r, results="hold", fig.width=5,fig.asp=2}
+enrichment_avail <- c("TF_ARCHS4","TF_TRANSFAC","TF_TRRUST","WikiPath","MSigDB","KEGG","GO")
+n <- 6
+
+for(j in c("HIV","VDv3") ){
+  pdf(paste0("../results/HIVstatus_all/GSA_Enrichment_barplot_",j,".pdf"), width = 5,height = 12,useDingbats = F)
+
+  try(file.remove(paste0("../results/HIVstatus_all/enrichment_",j,".xlsx")),silent = T)
+
+  # Set plotting device
+  mypar(length(enrichment_avail),1,mar = c(1,25,1,2))
+
+  # Create plot for each enrichment
+  for( i in enrichment_avail ){
+    tempD <- read.csv2(paste0("../results/HIVstatus_all/GSA_",i,"_",j,"_DOWN.csv"))
+    tempU <- read.csv2(paste0("../results/HIVstatus_all/GSA_",i,"_",j,"_UP.csv"))
+
+
+    write.xlsx2(tempU,
+                file=paste0("../results/HIVstatus_all/enrichment_",j,".xlsx"),
+                sheetName=paste0(i,'_1'), row.names=FALSE,
+               append = ifelse( file.exists(paste0("../results/HIVstatus_all/enrichment_",j,".xlsx")),T,F) )
+    write.xlsx2(tempD,
+                file=paste0("../results/HIVstatus_all/enrichment_",j,".xlsx"),
+                sheetName=paste0(i,'_2'), row.names=FALSE,
+               append = ifelse( file.exists(paste0("../results/HIVstatus_all/enrichment_",j,".xlsx")),T,F) )
+
+    # DD <- log10(tempD$P.value)[1:min(n,length(tempD$P.value))]
+    # UU <- rev(-log10(tempU$P.value)[1:min(n,length(tempU$P.value))])
+    # comb <- c( DD/abs(max(abs( c(DD,UU) ))) , UU/abs(max(abs(c(DD,UU)))) )
+    # 
+    # barplot( comb , xlim=c(
+    #   min(c(DD,-2/abs(max(abs(DD))) ))*1.1,
+    #   max(c(UU,2/abs(max(abs(UU)))) )*1.1),
+    #   cex.names = .9, main=i,
+    #          names.arg = c( (as.character(tempD$Term))[1:min(n,length(tempD$P.value))], rev(as.character(tempU$Term)[1:min(n,length(tempU$P.value))]) ),
+    #          horiz = T,las= 1, border=NA,xaxt='n',xlab="-log10 p-value",line=-.2,
+    #          col = colorRampPalette( c("navy","gray90","gray90","firebrick3") )(19)[(comb+1)*9+1] )
+    # points( comb , (1:(length(c(UU,DD))))*1.2-.5, bg=colorRampPalette( c("navy","gray90","gray90","firebrick3") )(19)[(comb+1)*9+1],pch=21 ,col="black",cex=1.5 )
+    # abline( v=c(0, 2/abs(max(abs(DD))), -2/abs(max(abs(UU)))), lty=c(1,3,3),col=c("black","black","black"))
+    # #pvalue
+    
+    
+    DD <- log10(tempD$P.value)[1:min(n,length(tempD$P.value))]
+    UU <- rev(-log10(tempU$P.value)[1:min(n,length(tempU$P.value))])
+    comb <- c( DD , UU )
+    names(comb) <- c(
+      tempD$Term[1:min(n,length(tempD$P.value))], 
+      rev(tempU$Term[1:min(n,length(tempU$P.value))]))
+    
+    absmax <- max(abs(range(comb)))
+
+    barplot( 
+      height = comb , 
+      xlim = absmax*c(-1,1)*1.5 ,
+      cex.names = .9, 
+      main = i,
+      names.arg = names(comb),
+      horiz = T,
+      las = 1, 
+      border = NA,
+      xaxt = 'n',
+      xlab = "-log10 p-value",
+      line = -.2,
+      col = colorRampPalette( c("navy","gray90","firebrick3") )(19)[(comb/absmax+1)*9+1] )
+    
+    points( 
+      x = comb , 
+      y = (1:(length(c(DD,UU))))*1.2-.5, 
+      bg = colorRampPalette( c("navy","gray90","firebrick3") )(19)[(comb/absmax+1)*9+1],
+      pch = 21 ,
+      col = "black",
+      cex = 1.5 )
+    
+    abline( v=c(0, 2, -2), lty=c(1,3,3), col=c("black","black","black"))
+    
+  }
+  dev.off()
+}
+```
+
+
+
+## Gene Set Analysis (GSEA)
+
+```{r}
+##################
+### HIV status ###
+##################
+# Create a gene rank based on the gene expression
+gene_rank <- setNames( top$logFC, casefold(rownames(top),upper=T) )
+# gene_rank <- gene_rank[ (abs(top$logFC) > lft/5) ]
+length(gene_rank)
+
+for(j in gsub(".txt","",list.files("../supplementary_files")) ){
+  # Load hallmark pathways
+  hallmark_pathways <- gmtPathways(paste0("../supplementary_files/",j,".txt") )
+
+  # Perform enrichemnt analysis
+  fgseaRes <- fgsea( pathways=hallmark_pathways, stats=gene_rank, minSize=10, maxSize=500)
+  fgseaRes2 <- as.data.frame(fgseaRes)[1:50,]
+  fgseaRes2$leadingEdge <- unlist(lapply(fgseaRes2$leadingEdge,function(x)paste0(x,collapse = ";")))
+  write.csv(fgseaRes2, paste0("../results/HIVstatus_all/fgseaRes_HIV_",j,".csv") )
+
+  # Filter the results table to show only the top 10 UP and DOWN regulated processes (optional)
+  topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=20), pathway]
+  topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=20), pathway]
+  topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+  # Nice summary table (shown as a plot)
+  pdf(paste0("../results/HIVstatus_all/GSEA_enrichment_plot_overview_HIV_",j,".pdf"),
+      width = 13,height = 7,useDingbats = F)
+  plotGseaTable(hallmark_pathways[topPathways], gene_rank, fgseaRes, gseaParam = 0.5)
+  dev.off()
+
+  pdf(paste0("../results/HIVstatus_all/GSEA_enrichment_plot_individual_HIV_",j,".pdf"),
+      width = 2*3,height = 20*2,useDingbats = F)
+  mypar(20,2)
+  p <- list()
+  for(k in 1:20){
+    for (i in c(topPathwaysUp[k],topPathwaysDown[k])){
+      plot_enrich(i,hallmark_pathways,gene_rank)
+    }
+  }
+  dev.off()
+}
+
+
+
+########################
+### Vaginal Douching ###
+########################
+# Create a gene rank based on the gene expression
+gene_rank <- setNames( top2$logFC, casefold(rownames(top2),upper=T) )
+# gene_rank <- gene_rank[ (abs(top$logFC) > lft/5) ]
+length(gene_rank)
+
+for(j in gsub(".txt","",list.files("../supplementary_files")) ){
+  # Load hallmark pathways
+  hallmark_pathways <- gmtPathways(paste0("../supplementary_files/",j,".txt") )
+
+  # Perform enrichemnt analysis
+  fgseaRes <- fgsea( pathways=hallmark_pathways, stats=gene_rank, minSize=10, maxSize=500)
+  fgseaRes2 <- as.data.frame(fgseaRes)[1:50,]
+  fgseaRes2$leadingEdge <- unlist(lapply(fgseaRes2$leadingEdge,function(x)paste0(x,collapse = ";")))
+  write.csv(fgseaRes2, paste0("../results/HIVstatus_all/fgseaRes_VDv3_",j,".csv") )
+
+  # Filter the results table to show only the top 10 UP and DOWN regulated processes (optional)
+  topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=20), pathway]
+  topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=20), pathway]
+  topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+  # Nice summary table (shown as a plot)
+  pdf(paste0("../results/HIVstatus_all/GSEA_enrichment_plot_overview_VDv3_",j,".pdf"),
+      width = 13,height = 7,useDingbats = F)
+  plotGseaTable(hallmark_pathways[topPathways], gene_rank, fgseaRes, gseaParam = 0.5)
+  dev.off()
+
+  pdf(paste0("../results/HIVstatus_all/GSEA_enrichment_plot_individual_VDv3_",j,".pdf"),
+      width = 2*3,height = 20*2,useDingbats = F)
+  mypar(20,2)
+  p <- list()
+  for(k in 1:20){
+    for (i in c(topPathwaysUp[k],topPathwaysDown[k])){
+      plot_enrich(i,hallmark_pathways,gene_rank)
+    }
+  }
+  dev.off()
+}
+```
+
+## GSEA enrichment barplot
+
+```{r}
+library(rafalib)
+col_grad <- colorRampPalette(c("navy","gray95","firebrick"))(99)
+N <- 10
+for(i in c("VDv3","HIV")){
+  pdf(paste0("../results/HIVstatus_all/Enrichment_barplot_",i,".pdf"), width = 20,height = 6,useDingbats = F)
+  for(j in gsub(".txt","",list.files("../supplementary_files")) ){
+    fgseaRes <- read.csv(paste0("../results/HIVstatus_all/fgseaRes_HIV_",j,".csv") )
+    fgseaRes <- fgseaRes[order(fgseaRes$ES,decreasing = F)  , ]
+    fgseaRes <- fgseaRes[fgseaRes$pval < 0.05,]
+    up <- fgseaRes[fgseaRes$ES > 0.2,]
+    up <- up[1:min(nrow(up),N),]
+    down <- fgseaRes[fgseaRes$ES < - 0.2,]
+    down <- down[1:min(nrow(down),N),]
+    top <- rbind(down,up)
+    top <- na.omit(top)
+
+    if(nrow(top) != 0){
+      par(mar=c(4,45,2,45))
+      barplot(top$ES, horiz = T, xlim=c(-1,1), border=NA,col = (col_grad[(top$ES/2+1)*49+1]), main=j)
+      points(rev(top$ES),(nrow(top):1)*1.2 - 0.5,
+           bg=rev(col_grad[(top$ES/2+1)*49+1]),pch=21 )
+      abline(v=0)
+      text(rev(top$ES),(nrow(top):1)*1.2 - 0.2,
+           labels = rev(top$pathway),xpd=T,
+           pos = ifelse(rev(top$ES)>0,4,2), col="grey30" )
+      text(rev(top$ES),(nrow(top):1)*1.2 - 0.7,
+           labels = rev(top$leadingEdge),cex=0.5,xpd=T,
+           pos = ifelse(rev(top$ES)>0,4,2), col="grey30" )
+    }
+  }
+  dev.off()
+}
+```
+
+
+
+
+```{r}
+
+```
