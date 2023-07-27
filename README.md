@@ -1,4 +1,4 @@
-# Transcriptomic analysis of Ectocervix during chronical HIV infection
+# RNA-seq of ectocervix under chronical HIV infection
 
 ## Description
 
