@@ -2,9 +2,9 @@
 
 ## Description
 
-This repository hosts the code used for analysis of bulk RNAseq samples from Kenyan donor cohort, which is publicly available on Gene Expression Omnibus (GEO) public repository, accession ID [GSE217237](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE217237).
+This repository hosts the code used for analysis of bulk RNAseq samples from a Kenyan cohort, which is publicly available on Gene Expression Omnibus (GEO) public repository, accession ID [GSE217237](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE217237).
 
-> Mathias Franzén Boger,1 Tyra Hasselrot,1 Vilde Kaldhusdal,1 Gisele H B Miranda,2,3 Paulo Czarnewski,4 Gabriella Edfeldt,1 Frideborg Bradley,1 Julie Lajoie,5 Joshua Kimani,5,6,7 Julius Oyugi,5,6 Kenneth Omollo,6 Keith R Fowke,5,6,7,8 Kristina Broliden,1 and Annelie Tjernlund1. **Downregulation of Epithelial Junction Proteins and Structural Disruption of the Ectocervical Epithelium in Women with Chronic HIV Infection**. _Unpublished_
+> Mathias Franzén Boger, Tyra Hasselrot, Vilde Kaldhusdal, Gisele H B Miranda, Paulo Czarnewski, Gabriella Edfeldt, Genta Rexaj, Frideborg Bradley, Julie Lajoie, Kenneth Omollo, Joshua Kimani, Keith R Fowke, Kristina Broliden, and Annelie Tjernlund. **Sustained immune activation and impaired epithelial barrier integrity in the ectocervix of women with chronic HIV infection**. _Unpublished_
 
 ## Analysis Reproducibility
 
