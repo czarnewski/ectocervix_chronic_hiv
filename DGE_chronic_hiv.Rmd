@@ -11,7 +11,7 @@ output:
     number_sections: true
     theme: flatly
     highlight: tango
-    self_contained: false
+    self_contained: true
     keep_md: false
 editor_options: 
   chunk_output_type: console
@@ -44,23 +44,19 @@ library(pheatmap)
 ```{r analysis-parameters}
 pvt <- 0.01
 lft <- log2(1.5)
-out <- "../results/"
 
 # Set enrichment cutoffs for sig. terms
 pvalue_cutoff <- 0.1
 no_genes_cutoff <- 3
 
+```
+
+```{r get-GEO-data, eval=FALSE}
 # data paths
 m_path <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE194nnn/GSE194276/suppl/GSE194276%5Fmetadata%2En%5F112%2Ecsv%2Egz"
 c_path1 <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE183nnn/GSE183513/suppl/GSE183513%5FRaw%5Fgene%5Fcounts%5Fmatrix%2Ecsv%2Egz"
 c_path2 <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE194nnn/GSE194276/suppl/GSE194276%5Fcounts%2Draw%2En%5F16%2Ecsv%2Egz"
 
-
-meta_path <- "./metadata.csv"
-RNAseq_path <- "../Raw_gene_counts_matrix.csv"
-```
-
-```{r get-GEO-data}
 download.file(m_path, destfile = "./metadata.csv.gz")
 download.file(c_path1, destfile = "./Raw_gene_counts_1.csv.gz")
 download.file(c_path2, destfile = "./Raw_gene_counts_2.csv.gz")
@@ -69,23 +65,28 @@ meta <- read.csv(gzfile("./metadata.csv.gz"), row.names = 1)
 
 tmp1 <- read.csv(gzfile("./Raw_gene_counts_1.csv.gz"))
 tmp2 <- read.csv(gzfile("./Raw_gene_counts_2.csv.gz"))
-counts_all <- left_join(tmp1, tmp2, by=c("entrez", "symbol", "length"))
-write_csv(counts_all, "../Raw_gene_counts_matrix.csv")
+counts_all <- left_join(tmp1, tmp2, by=c("entrez", "symbol", "length")) %>% filter(!is.na(symbol))
+write_csv(counts_all, "./Raw_gene_counts_matrix.csv")
 ```
 
 ## Load counts and metadata
 
 ```{r load-data}
+# data paths
+meta_path <- "./metadata.csv"
+RNAseq_path <- "./Raw_gene_counts_matrix.csv"
+
 counts_all <- read.csv(
   file = RNAseq_path,
   row.names = 1)
 
-meta_ <- read.csv(
+meta <- read.csv(
   file = meta_path,
   row.names = 1)
+
 counts_all <- rowsum( counts_all[,-c(1:2) ] , counts_all$symbol )
 counts_all <- counts_all[,order(colnames(counts_all))]
-counts_all <- counts_all[1:(dim(counts_all)-1),]
+counts_all <- counts_all[complete.cases(counts_all), ]
 dim(counts_all)
 
 ```
@@ -101,15 +102,16 @@ samples_ID <- c("P001", "P003", "P004", "P005", "P006", "P007", "P008", "P009",
                 "P075", "P079", "P080", "P081", "P087")
 
 # n = 61 (keep 2 HIV samples on DMPA)
-# result_dir <- "../results/HIVstatus_all/N=61/"
-# samples_use <- samples_ID
-# run <- "n=61"
+result_dir <- "./results/N=61/"
+samples_use <- samples_ID
+run <- "n=61"
 
 # n = 59 (remove 2 HIV samples on DMPA)
-result_dir <- "../results/HIVstatus_all/N=59/"
-samples_use <-  samples_ID[!(samples_ID %in% c("P010", "P032"))]
-run <- "noDMPA"
+# result_dir <- "../results/N=59/"
+# samples_use <-  samples_ID[!(samples_ID %in% c("P010", "P032"))]
+# run <- "noDMPA"
 
+if( isFALSE(dir.exists(result_dir)) ) { dir.create(result_dir,recursive = TRUE) }
 ```
 
 
@@ -120,7 +122,6 @@ meta   <- as.data.frame(meta[ samples_use ,])
 dim(counts)
 dim(meta)
 
-if(!dir.exists(result_dir)){dir.create(result_dir)}
 ```
 
 ***
@@ -138,7 +139,7 @@ dim(design)
 ## Fit counts with edgeR
 
 ```{r calculate-DEGs}
-y <- DGEList( counts=counts , group = Group, remove.zeros=T)
+y <- DGEList( counts=counts, group = Group, remove.zeros=T)
 y <- calcNormFactors(object = y, method = "TMM")
 y <- estimateGLMCommonDisp(y,design)
 y <- estimateGLMTrendedDisp(y,design)
@@ -155,18 +156,20 @@ normcounts <- cpm(y, log = T, prior.count = 1, normalized.lib.sizes = T)
 # Differential expression for HIV
 lrt <- glmLRT(fit, coef = 2)
 top <- topTags(lrt, adjust.method = "fdr", n = "all", sort.by = "p.value")[[1]] %>%
-  mutate('regulation' = ifelse(logFC >= lft & PValue <= pvt ,"Up", 
+  mutate('regulation_FC' = ifelse(logFC >= lft & PValue <= pvt ,"Up", 
                                ifelse(logFC <= -lft & PValue  <= pvt, "Down", 'NotSig'))) %>%
+  mutate('regulation_FDR' = ifelse(logFC >= 0 & FDR <= 0.05 ,"Up", 
+                               ifelse(logFC <= -0 & FDR  <= 0.05, "Down", 'NotSig'))) %>%
   mutate('symbol' = rownames(.), .before = "logFC") 
 
 # summary of regulation
-s_df <- enframe(table(top$regulation), "Regulation", "genes")
+s_df <- enframe(table(top$regulation_FDR), "Regulation", "genes")
 s_df
 
 # top 15 genes sorted by logFC
 top_DEGs <- top %>%
-  filter(grepl("Up|Down",.$regulation)) %>%
-  group_by(regulation) %>%
+  filter(grepl("Up|Down",.$regulation_FDR)) %>%
+  group_by(regulation_FDR) %>%
   slice_max(., n = 15, order_by = abs(logFC))
 
 knitr::kable(top_DEGs, caption = "Top 15 genes sorted by logFC")
@@ -174,7 +177,7 @@ knitr::kable(top_DEGs, caption = "Top 15 genes sorted by logFC")
 
 ```{r define-DEGs}
 # NB! here you define what genes to be included in the heatmap:
-top$is_de <- (abs(top$logFC) > lft) & (top$PValue < pvt)
+top$FC <- (abs(top$logFC) > lft) & (top$PValue < pvt)
 top$almost_de <- (abs(top$logFC) > lft) & (top$PValue < pvt*3)
 top$fdr <- top$FDR < 0.05
 
@@ -215,18 +218,18 @@ write.csv( counts , file = paste0(result_dir,"raw_counts.csv"), row.names = T)
 pv <- top$PValue
 
 # top 15 by logFC and top 13 by p-value combined:
-lable_symbols <- unique(c(top_DEGs$symbol, top$symbol[1:13][top$is_de[1:13]] ))
+lable_symbols <- unique(c(top_DEGs$symbol, top$symbol[1:13][top$FC[1:13]] ))
 top$Lable <- ifelse(grepl(paste0(lable_symbols, collapse="$|^"),top$symbol), top$symbol,NA)
 
 pdf(paste0(result_dir,"DGE_volcano_plot_HIV_",run,".pdf"),width=5,height=5,useDingbats = F)
 mypar()
 plot(top$logFC,-log10(pv),xlim=c(-.9,.9)*max(abs(range(top$logFC)))*1.2,
-     col=c("#00007F","grey70","firebrick")[as.numeric(as.factor(top$regulation))], pch=16,
+     col=c("#00007F","grey70","firebrick")[as.numeric(as.factor(top$regulation_FDR))], pch=16,
      cex= 0.3 -log10(pv) / max(-log10(pv)) * abs(top$logFC) / max(abs(range(top$logFC)))*2 )
 text(#top$logFC[top$is_top],-log10(pv)[top$is_top],
      top$logFC,-log10(pv),
      labels = top$Lable, cex=0.4,
-     pos = ifelse(top$logFC[top$is_de] > 0 , 2, 4),offset = 0.4 )
+     pos = ifelse(top$logFC[top$FC] > 0 , 2, 4),offset = 0.4 )
 dev.off()
 ```
 
@@ -236,7 +239,7 @@ dev.off()
 
 ```{r PCA-plot}
 # significance: P.value <= 0.01 & Fold change => log2(1.5)
-PC <- prcomp( t(normcounts[rownames(top)[top$is_de],]) ,center = T,scale. = T)
+PC <- prcomp( t(normcounts[rownames(top)[top$FC],]) ,center = T,scale. = T)
 pdf(paste0(result_dir,"DGE_PCA_HIV_",run,".pdf"),width = 5,height = 4.2,useDingbats = F)
 par(mar=c(3,3,2,6))
 plot(PC$x[,c(1,2)], pch=21, las=1, cex = 1.3,
@@ -267,7 +270,7 @@ dev.off()
 ### HIV status
 
 ```{r heatmap}
-plot_hetampa.fun <- function(temp, file, filt){
+plot_heatmap.fun <- function(temp, file, filt){
   pheatmap::pheatmap(
     mat = normcounts[rownames(temp),o],
     scale = "row",
@@ -280,11 +283,11 @@ plot_hetampa.fun <- function(temp, file, filt){
     clustering_method = "ward.D2",
     annotation_col = data.frame(
       age = as.numeric(meta$age),
-      BV_Diagnosis_v3 = factor(meta$BV_Diagnosis_v3),
+      BV_Diagnosis_v3 = factor(meta$BV.Diagnosis),
       HIVstatus = factor(meta$HIVstatus),
       row.names = rownames(meta)) ,
     annotation_row = data.frame(
-      #is_top_DE = factor(top$is_de[top$is_de]*1),
+      #is_top_DE = factor(top$FC[top$FC]*1),
       abs_log2FC = abs(top$logFC)[top[[filt]]],
       log10PV = -log10(top$PValue)[top[[filt]]],
       row.names = rownames(top)[top[[filt]]]) ,
@@ -298,20 +301,20 @@ top$is_top <- (abs(top$logFC) > log2(2)) & (top$PValue < 0.01)
 top$fdr <- top$FDR < 0.05
 
 # significance: P.value <= 0.01 & Fold change => log2(1.5)
-temp <- top[ top$is_de, ]
+temp <- top[ top$FC, ]
 temp <- temp[order(temp$logFC),]
-plot_hetampa.fun(temp, paste0("DGE_heatmap_HIV_",run,".pdf"), filt="is_de")
+plot_heatmap.fun(temp, paste0("DGE_heatmap_HIV_",run,".pdf"), filt="FC")
 
 # significance: FDR < 0.05
 temp <- top[ top$fdr, ]
 temp <- temp[order(temp$logFC),]
-plot_hetampa.fun(temp, paste0("DGE_heatmap_HIV_FDR_",run,".pdf"), filt="fdr")
+plot_heatmap.fun(temp, paste0("DGE_heatmap_HIV_FDR_",run,".pdf"), filt="fdr")
 ```
 
 
 ***
 
-# Gene Set Analysis (EnrichR)
+# Functional Enrichment Analysis (EnrichR)
 
 ## Compute overrepresentation
 
@@ -330,17 +333,14 @@ for(i in c("HIV") ){
     gene_list <- names(cl)[cl == j]
 
     # Gene Onthology
-    a <- enrichr(genes = gene_list,
-                 databases = "GO_Biological_Process_2021")[[1]]
+    a <- enrichr(genes = gene_list, databases = "GO_Biological_Process_2021")[[1]]
     a <- a[order(a$P.value,decreasing = F),]
     a <- a[a$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(a[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
     a <- a[grep("regulation",a$Term,invert = T),]
-    a <- data.frame(Term = sub("\ [(].*","",a$Term), GOID= sub(".*\ [(]","",sub("[)]","",a$Term)), P.value = a$P.value, Genes=a$Genes)
-    #write.csv2(a, file=paste0("../results/HIVstatus_all/GSA_GO_",i,"_",j,".csv"))
-    #write.csv2(a,file=paste0(out2,"GO_",i,"_",ifelse(j==1,"UP","DOWN"),".csv"))
+    a <- separate_wider_regex(a, cols=Term, pattern=c(Term=".+(?=\\s\\()", "\\s\\(", GOid="GO\\:\\d+", "\\)"), too_few = "align_start")
+
     openxlsx::addWorksheet(wb, sheetName=paste0("GO_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("GO_",j), a)
-
 
     # KEGG pathways
     b <- enrichr(genes=gene_list, databases = "KEGG_2021_Human")[[1]]
@@ -349,7 +349,7 @@ for(i in c("HIV") ){
     b <- b[b$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(b[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
     b$KEGGID <- sub(".*sapiens ","",b$Term); b$Term <- sub(" Homo.*","",b$Term)
     b <- data.frame(b)
-    #write.csv2(b,file=paste0("../results/HIVstatus_all/GSA_KEGG_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("KEGG_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("KEGG_",j), b)
 
@@ -357,7 +357,7 @@ for(i in c("HIV") ){
     c <- enrichr(genes=gene_list, databases = "MSigDB_Hallmark_2020")[[1]]
     c <- c[order(c$P.value,decreasing = F),]
     c <- c[c$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(c[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
-    #write.csv2(c,file=paste0("../results/HIVstatus_all/GSA_MSigDB_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("MSigDB_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("MSigDB_",j), c)
 
@@ -369,17 +369,17 @@ for(i in c("HIV") ){
     d <- d[grepl("human",d$Term),]
     d$Term <- sub("\ human","",d$Term)
     d <- d[d$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(d[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
-    #write.csv2(d,file=paste0("../results/HIVstatus_all/GSA_TF_TRRUST_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("TF_TRRUST_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("TF_TRRUST_",j), d)
 
 
     # Wiki pathways
     e <- enrichr(genes=gene_list, databases = "WikiPathway_2021_Human")[[1]]
-    e <- c[order(e$P.value,decreasing = F),]
-    e <- c[e$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(c[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    e <- e[order(e$P.value,decreasing = F),]
+    e <- e[e$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(c[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
     e$wikiID <- sub(".* WP[0123456789]","WP",e$Term) ; e$Term <- sub(" WP[0123456789].*","",e$Term)
-    #write.csv2(c,file=paste0("../results/HIVstatus_all/GSA_WikiPath_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("WikiPath_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("WikiPath_",j), e)
     
@@ -388,7 +388,7 @@ for(i in c("HIV") ){
                  databases = "TRANSFAC_and_JASPAR_PWMs")[[1]]
     f <- f[order(f$P.value,decreasing = F),]
     f <- f[f$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(f[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
-    #write.csv2(f,file=paste0("../results/HIVstatus_all/GSA_TF_TRANSFAC_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("TF_TRANSFAC_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("TF_TRANSFAC_",j), f)
 
@@ -398,7 +398,7 @@ for(i in c("HIV") ){
                  databases = "ARCHS4_TFs_Coexp")[[1]]
     g <- g[order(g$P.value,decreasing = F),]
     g <- g[g$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(g[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
-    #write.csv2(f,file=paste0("../results/HIVstatus_all/GSA_TF_ARCHS4_",i,"_",j,".csv"))
+
     openxlsx::addWorksheet(wb, sheetName=paste0("TF_ARCHS4_",j) )
     openxlsx::writeDataTable(wb, sheet=paste0("TF_ARCHS4_",j), g)
 
@@ -407,17 +407,29 @@ for(i in c("HIV") ){
 }
 }
 
+get_reg.fun <- function(FC_val, p_col, p_val){
+  t <- top %>%
+  mutate('reg' = ifelse(logFC >= FC_val & {{p_col}} <= p_val ,"Up", 
+                        ifelse(logFC <= -FC_val & {{p_col}}  <= p_val, "Down", 'NotSig'))) %>%
+    filter(!(grepl("NotSig", reg)))
+  set_names(t$reg, t$symbol)
+}
+
 # significance: P.value <= 0.01 & Fold change => log2(1.5)
-h_HIV <- set_names( top[top$is_de, "regulation"], top[top$is_de, "symbol"] )
+h_HIV <- get_reg.fun(1.5, PValue, 0.01)
 run_enrichment.fun(h_HIV, paste0("GSA_",run,".xlsx"))
 
 # significance: FDR < 0.05
-h_HIV <- set_names( top[top$fdr, "regulation"], top[top$fdr, "symbol"] )
-run_enrichment.fun(h_HIV, paste0("GSA_FDR_",run,".xlsx"))
+h_HIV <- get_reg.fun(0, FDR, 0.05)
+run_enrichment.fun(h_HIV, paste0("GSA_FDR_0.05_",run,".xlsx"))
+
+# significance: FDR < 0.1
+h_HIV <- get_reg.fun(0, FDR, 0.1)
+run_enrichment.fun(h_HIV, paste0("GSA_FDR_0.1_",run,".xlsx"))
 
 ```
 
-## Plot GSA results
+## Plot Functional Enrichment Analysis results
 
 ```{r enrichment-plots, results="hold", fig.width=6,fig.height=4}
 #####################
@@ -427,20 +439,21 @@ run_enrichment.fun(h_HIV, paste0("GSA_FDR_",run,".xlsx"))
 n <- 10
 comparison <- c("HIV")
 enrichment_db <- c("GO","KEGG","TF_ARCHS4","TF_TRANSFAC","TF_TRRUST","WikiPath","MSigDB")
-sheets <- readxl::excel_sheets(paste0(result_dir, "GSA_",run,".xlsx" ))
+sheets <- readxl::excel_sheets(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ))
 
 for( x in comparison ){
   pdf(paste0(result_dir,"GSA_Enrichment_barplot_",x,"_",run,".pdf"), 
       width = 6,height = 4,useDingbats = F)
 
 for( i in enrichment_db ){
-  DD <- Inf
+
+  DD <- 0
   UU <- 0
   names_DD <- ""
   names_UU <- ""
   
-  f_DOWN <- read_xlsx(paste0(result_dir, "GSA_",run,".xlsx" ), sheet = paste0(i,"_Down")) 
-  f_UP <- read_xlsx(paste0(result_dir, "GSA_",run,".xlsx" ), sheet = paste0(i,"_Up"))
+  f_DOWN <- read_xlsx(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ), sheet = paste0(i,"_Down")) %>% filter(Adjusted.P.value <= 0.05)
+  f_UP <- read_xlsx(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ), sheet = paste0(i,"_Up")) %>% filter(Adjusted.P.value <= 0.05)
   
   if (is.data.frame(f_DOWN) && nrow(f_DOWN)>0){
     tempD_e <- f_DOWN
@@ -448,7 +461,7 @@ for( i in enrichment_db ){
     DD <- log10(tempD_e$P.value)[1:min(n,length(tempD_e$P.value))]
     names_DD <- (as.character(tempD_e$Term))[1:min(n,length(tempD_e$P.value))]
   }
-  if (is.data.frame(f_DOWN) && nrow(f_DOWN)>0){
+  if (is.data.frame(f_UP) && nrow(f_UP)>0){
     tempU_e <- f_UP
     tempU_e$Term <- gsub("tf ARCHS4 coexpression", "", tempU_e$Term, perl = TRUE)
     UU <- rev(-log10(tempU_e$P.value)[1:min(n,length(tempU_e$P.value))])
