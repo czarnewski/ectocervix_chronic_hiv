@@ -76,15 +76,16 @@ write_csv(counts_all, "./Raw_gene_counts_matrix.csv")
 meta_path <- "./metadata.csv"
 RNAseq_path <- "./Raw_gene_counts_matrix.csv"
 
+# entrez ids as rownames
 counts_all <- read.csv(
-  file = RNAseq_path,
-  row.names = 1)
+  file = RNAseq_path)
 
 meta <- read.csv(
   file = meta_path,
   row.names = 1)
 
-counts_all <- rowsum( counts_all[,-c(1:2) ] , counts_all$symbol )
+entrez <- counts_all[, c("entrez","symbol")]
+counts_all <- rowsum( counts_all[,-c(1:3) ] , counts_all$symbol )
 counts_all <- counts_all[,order(colnames(counts_all))]
 counts_all <- counts_all[complete.cases(counts_all), ]
 dim(counts_all)
@@ -204,6 +205,7 @@ write.xlsx( DEG_list , file = paste0(result_dir,"DGE_HIV_",run,".xlsx"))
 write.csv( normcounts , file = paste0(result_dir,"normcounts.csv"), row.names = T)
 write.csv( counts , file = paste0(result_dir,"raw_counts.csv"), row.names = T)
 
+# top <- read_xlsx(paste0(result_dir,"DGE_HIV_",run,".xlsx"))
 ```
 
 ***
@@ -318,7 +320,8 @@ plot_heatmap.fun(temp, paste0("DGE_heatmap_HIV_FDR_",run,".pdf"), filt="fdr")
 
 ## Compute overrepresentation
 
-```{r enrichment-analysis}
+```{r enrichment-analysis, include=FALSE, eval=FALSE}
+# not used due to lack of background list functionality
 run_enrichment.fun <- function(h_HIV, file){
 wb <- createWorkbook()
 
@@ -429,6 +432,102 @@ run_enrichment.fun(h_HIV, paste0("GSA_FDR_0.1_",run,".xlsx"))
 
 ```
 
+### Save gene lists and background for use in enrichr browser
+
+```{r gene-lists}
+
+# Get gene lists with up and down regulated genes separately 
+get_reg.fun <- function(FC_val, p_col, p_val){
+  t <- top %>%
+  mutate('reg' = ifelse(logFC >= FC_val & {{p_col}} <= p_val ,"Up", 
+                        ifelse(logFC <= -FC_val & {{p_col}}  <= p_val, "Down", 'NotSig'))) %>%
+    filter(!(grepl("NotSig", reg)))
+  set_names(t$reg, t$symbol)
+}
+
+# significance: FDR < 0.1
+h_HIV <- get_reg.fun(0, FDR, 0.1)
+
+down <- top %>% filter(symbol %in% names(h_HIV[h_HIV=="Down"])) %>% select(down="symbol")
+up <-  top %>% filter(symbol %in% names(h_HIV[h_HIV=="Up"])) %>% select(up="symbol")
+background <- select(counts_all, background="symbol")
+
+# combine gene lists in one table
+as_tibble(background) %>%
+  rownames_to_column(.) %>%
+  left_join(.,  rownames_to_column(up) ) %>%
+  left_join(.,  rownames_to_column(down) ) %>%
+  select(-rowname) %>%
+  write.xlsx( ., file = paste0(result_dir,"Enrichr_gene_lists.xlsx"))
+
+```
+
+
+```{r enrichr-API}
+#### ACCES ENRICHR API THROUGH R ####
+remotes::install_github("MaayanLab/backr/backr")
+library(backr)
+library(jsonlite)
+library(httr) 
+fromJSON <- jsonlite::fromJSON
+
+# specify the server
+backr::set_server("https://maayanlab.cloud/speedrichr")
+
+# List supported gene set libraries
+libraries <- backr::list_libraries()
+
+# Use all 15 435 genes as background
+bg = background$background
+up <- up$up
+down <- down$down
+db <- c("GO_Biological_Process_2023","KEGG_2021_Human","ARCHS4_TFs_Coexp","MSigDB_Hallmark_2020") # "TRRUST_Transcription_Factors_2019",
+# the TRRUST database did not work so we went with the manual way instead, see instructions bellow
+# NB! the column names are different from the ones produced by manually downloading the results from the website
+
+result <- tibble(genes=list(up, down), db = list(db, db)) %>% 
+  unnest(db) %>%
+  pmap(., ~backr::enrich(..2, gene_array = ..1, background = bg)) %>%
+  set_names(., unlist(map(c("Up", "Down"), ~paste0(str_extract(db, "^[^_]+"), "_", .x))))
+
+# Save to excel file
+write.xlsx( result, file = paste0("./results/enricr_browser/","FEA_HIV_",run,".xlsx"))
+
+
+#### MANUAL ALTERNATIVE ####
+
+# The gene lists was copy pasted into the enrichr web interface on 21th of October 2024
+# up and down regulated genes was queried separately
+# https://maayanlab.cloud/Enrichr/enrich
+# the databases used was:
+# GO_Biological_Process_2023
+# KEGG_2021_Human
+# TRRUST_Transcription_Factors_2019
+# ARCHS4_TFs_Coexp
+# MSigDB_Hallmark_2020
+
+
+# Combine all tables downloaded from the enrichr website into one excel workbook:
+folders <- c("Up", "Down") %>% set_names()
+pattern <- paste0(c("GO","KEGG", "MSigDB", "ARCHS4", "TRRUST"), collapse = "|")
+
+file_list <- folders %>%
+  # Get list of all .txt files in both folders
+  map(., ~list.files(path = paste0(getwd(),"/results/enricr_browser/", .x, "/"),  pattern = "\\.txt$", full.names = TRUE)) %>%
+  enframe() %>%
+  mutate( names = pmap(., ~paste0(str_extract_all(..2, pattern), "_", ..1))) %>%
+  # Create a named list of file names
+  mutate( value = pmap(., ~set_names(..2, ..3))) %>% 
+  .$value %>%
+  flatten_chr(.) %>%
+  # Read each file into a tibble
+  map(., ~read_tsv(.x))
+
+# Save to excel file
+write.xlsx( file_list , file = paste0("./results/enricr_browser/","FEA_HIV_",run,".xlsx"))
+```
+
+
 ## Plot Functional Enrichment Analysis results
 
 ```{r enrichment-plots, results="hold", fig.width=6,fig.height=4}
@@ -438,8 +537,10 @@ run_enrichment.fun(h_HIV, paste0("GSA_FDR_0.1_",run,".xlsx"))
 # Create plot for each enrichment
 n <- 10
 comparison <- c("HIV")
-enrichment_db <- c("GO","KEGG","TF_ARCHS4","TF_TRANSFAC","TF_TRRUST","WikiPath","MSigDB")
-sheets <- readxl::excel_sheets(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ))
+enrichment_db <- c("GO","KEGG","ARCHS4","TRRUST","MSigDB")
+path <- paste0("./results/enricr_browser/","FEA_HIV_",run,".xlsx") # browser results
+result_dir <- "./results/enricr_browser/"
+
 
 for( x in comparison ){
   pdf(paste0(result_dir,"GSA_Enrichment_barplot_",x,"_",run,".pdf"), 
@@ -452,20 +553,24 @@ for( i in enrichment_db ){
   names_DD <- ""
   names_UU <- ""
   
-  f_DOWN <- read_xlsx(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ), sheet = paste0(i,"_Down")) %>% filter(Adjusted.P.value <= 0.05)
-  f_UP <- read_xlsx(paste0(result_dir, "GSA_FDR_0.1_",run,".xlsx" ), sheet = paste0(i,"_Up")) %>% filter(Adjusted.P.value <= 0.05)
+  f_DOWN <- read_xlsx(path, sheet = paste0(i,"_Down")) %>% filter(`Adjusted P-value` <= 0.05)
+  f_UP <- read_xlsx(path, sheet = paste0(i,"_Up")) %>% filter(`Adjusted P-value` <= 0.05) # Adjusted.P.value
   
   if (is.data.frame(f_DOWN) && nrow(f_DOWN)>0){
     tempD_e <- f_DOWN
+    if (i == "GO")
+      {tempD_e <- separate_wider_regex(tempD_e, cols=Term, pattern=c(Term=".+(?=\\s\\()", "\\s\\(", GOid="GO\\:\\d+", "\\)"), too_few = "align_start")}
     tempD_e$Term <- gsub("tf ARCHS4 coexpression", "", tempD_e$Term, perl = TRUE)
-    DD <- log10(tempD_e$P.value)[1:min(n,length(tempD_e$P.value))]
-    names_DD <- (as.character(tempD_e$Term))[1:min(n,length(tempD_e$P.value))]
+    DD <- log10(tempD_e$`P-value`)[1:min(n,length(tempD_e$`P-value`))]
+    names_DD <- (as.character(tempD_e$Term))[1:min(n,length(tempD_e$`P-value`))]
   }
   if (is.data.frame(f_UP) && nrow(f_UP)>0){
     tempU_e <- f_UP
+    if (i == "GO")
+      {tempU_e <- separate_wider_regex(tempU_e, cols=Term, pattern=c(Term=".+(?=\\s\\()", "\\s\\(", GOid="GO\\:\\d+", "\\)"), too_few = "align_start")}
     tempU_e$Term <- gsub("tf ARCHS4 coexpression", "", tempU_e$Term, perl = TRUE)
-    UU <- rev(-log10(tempU_e$P.value)[1:min(n,length(tempU_e$P.value))])
-    names_UU <- rev(as.character(tempU_e$Term)[1:min(n,length(tempU_e$P.value))])
+    UU <- rev(-log10(tempU_e$`P-value`)[1:min(n,length(tempU_e$`P-value`))])
+    names_UU <- rev(as.character(tempU_e$Term)[1:min(n,length(tempU_e$`P-value`))])
   }
   
   max_comb <- max(abs(na.omit(c(DD,UU))))
